@@ -1,5 +1,6 @@
 local registered_components = {}
 local registered_systems = {}
+local registered_prefabs = {}
 
 --ENTITY
 
@@ -47,7 +48,7 @@ function Entity:remove_component(name)
     --remove entity from systems that require the removed component if the entity exists in that system
     for system_name, system in pairs(self.ecs.systems) do
         if system.components[name] and system.entities[self] then
-            system.entities[entity] = nil
+            system.entities[self] = nil
         end
     end
 end
@@ -67,11 +68,18 @@ function ecs.new()
     }, ecs)
 end
 
-function ecs.define_component(name, data)
-    registered_components[name] = data
-    data.__index = data
+function ecs.define_prefab(name, prefab)
+    registered_prefabs[name] = setmetatable(prefab, Entity)
+    prefab.__index = prefab
 
-    return data
+    return prefab
+end
+
+function ecs.define_component(name, component)
+    registered_components[name] = component
+    component.__index = component
+
+    return component
 end
 
 function ecs.define_system(name, components, system)
@@ -90,22 +98,46 @@ end
 
 local file_name_pattern = "([%w_]+)%." --capture the file's name without extension. (Use with string:match())
 
-function ecs.load_systems(folder)
-    for _, file_path in pairs(love.filesystem.getDirectoryItems(folder)) do
-        local values = require(folder .. "/" .. file_path:sub(1, -5))
-        local system_name = file_path:match(file_name_pattern)
+local function recursive_load(folder, load_func)
+    for _, file_or_folder_name in pairs(love.filesystem.getDirectoryItems(folder)) do
+        local path = folder .. "/" .. file_or_folder_name
+        local info = love.filesystem.getInfo(path)
 
-        ecs.define_system(file_path:sub(1, -5), values.components, values.system)
+        if info.type == "directory" then
+            recursive_load(path)
+        elseif info.type == "file" then
+            if not (file_or_folder_name == "init.lua") then
+                load_func(path)
+            end
+        end
     end
 end
 
-function ecs.load_components(folder)
-    for _, file_path in pairs(love.filesystem.getDirectoryItems(folder)) do
-        local component = require(folder .. "/" .. file_path:sub(1, -5))
-        local component_name = file_path:match(file_name_pattern)
+function ecs.load_systems(folder)
+    recursive_load(folder, function(path)
+        local system = require(path:sub(1, -5))
+        local system_name = path:match(file_name_pattern)
 
+        ecs.define_system(system_name, system.components, system.system)
+    end)
+end
+
+function ecs.load_components(folder)
+    recursive_load(folder, function(path)
+        local component = require(path:sub(1, -5))
+        local component_name = path:match(file_name_pattern)
+    
         ecs.define_component(component_name, component)
-    end
+    end)
+end
+
+function ecs.load_prefabs(folder)
+    recursive_load(folder, function(path)
+        local prefab = require(path:sub(1, -5))
+        local prefab_name = path:match(file_name_pattern)
+
+        ecs.define_prefab(prefab_name, prefab)
+    end)
 end
 
 function ecs.add_event(event_name)
@@ -114,13 +146,19 @@ function ecs.add_event(event_name)
     end
 end
 
-function ecs:add_entity()
-    local entity = setmetatable({
-        ecs = self,
-        components = {}
-    }, Entity)
+function ecs:add_entity(prefab_name)
+    local entity = prefab_name and
+    setmetatable({}, registered_prefabs[prefab_name]) or 
+    setmetatable({}, Entity)
+
+    entity.ecs = self
+    entity.components = {}
 
     self.entities[entity] = entity
+
+    if entity.init then
+        entity:init()
+    end
 
     --entities start with no components, no need to add to systems yet
 
